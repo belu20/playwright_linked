@@ -5,8 +5,8 @@ services:
     container_name: linkedin-search
     restart: on-failure:5
     init: true
-    shm_size: "1gb"
-    mem_limit: 2.3g
+    shm_size: "700mb"
+    mem_limit: 1.2g
     cpus: 1.5
     ports:
       - "1567:1567"
