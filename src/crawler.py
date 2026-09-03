@@ -622,37 +622,22 @@ class LinkedInCrawler:
     def scroll_search_results(self) -> bool:
         moved = False
         try:
-            workspace = self.page.query_selector("#workspace")
-            if workspace:
-                before = self.page.evaluate("el => el.scrollTop", workspace)
-                self.page.evaluate("el => { el.scrollTop = el.scrollTop + 1200; }", workspace)
-                after = self.page.evaluate("el => el.scrollTop", workspace)
-                moved = after > before
-        except Exception as e:
-            print(f"[DEBUG] workspace scroll failed: {e}")
-
-        # Fallback window scroll untuk layout baru LinkedIn (tanpa #workspace)
-        try:
+            # 1. Scroll window secara langsung
             self.page.evaluate("window.scrollBy(0, 1000);")
+            # 2. Kirim tombol PageDown yang paling natural & ringan memicu infinite scroll LinkedIn
+            self.page.keyboard.press("PageDown")
             moved = True
         except Exception as e:
-            print(f"[DEBUG] window scroll failed: {e}")
+            print(f"[DEBUG] scroll failed: {e}")
 
-        # Cek tombol "Load more" dengan timeout ketat (1500ms) agar tidak hang
+        # 3. Klik tombol 'Load more' jika muncul (pakai CSS selector cepat tanpa XPath berat)
         try:
-            buttons = self.page.query_selector_all(
-                "xpath=//button[contains(., 'Load more') or contains(., 'Muat lebih banyak')]"
-            )
-            for btn in buttons:
-                try:
-                    if btn.is_visible() and btn.is_enabled():
-                        btn.scroll_into_view_if_needed(timeout=1500)
-                        btn.click(timeout=1500)
-                        return True
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"[DEBUG] Load more lookup failed: {e}")
+            load_more = self.page.locator("button.scaffold-finite-scroll__load-button").first
+            if load_more.is_visible(timeout=500):
+                load_more.click(timeout=1000)
+                print("[INFO] Clicked 'Load more' button")
+        except Exception:
+            pass
 
         return moved
 
