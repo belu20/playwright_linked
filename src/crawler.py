@@ -56,9 +56,9 @@ class LinkedInCrawler:
                 '--ignore-certificate-errors',
                 '--allow-running-insecure-content',
 
-                # --- Hemat CPU & RAM: matikan fitur berat ---
-                '--single-process',                 # 1 proses Chrome, hemat ~100-150MB RAM
-                '--renderer-process-limit=1',       # maks 1 renderer process
+                # --- Hemat CPU & RAM: stabil dan aman ---
+                '--renderer-process-limit=1',       # batasi maks 1 proses renderer
+                '--no-zygote',                      # kurangi proses fork tambahan
                 '--disable-extensions',
                 '--disable-background-networking',
                 '--disable-background-timer-throttling',
@@ -78,7 +78,7 @@ class LinkedInCrawler:
                 '--test-type=ui',
 
                 # --- Hemat RAM renderer & JS heap ---
-                '--js-flags=--max-old-space-size=128',  # cap heap JS di 128MB
+                '--js-flags=--max-old-space-size=256',  # 256MB cukup aman untuk JS LinkedIn tanpa crash OOM
                 '--blink-settings=imagesEnabled=false', # tidak load gambar
             ],
             viewport={"width": 800, "height": 600},   # lebih kecil = renderer lebih ringan
@@ -924,7 +924,7 @@ class LinkedInCrawler:
 
             except Exception as e:
                 print("[ERROR] Reason:", e)
-            self.page.wait_for_timeout(2000)
+            time.sleep(2)
 
         self.logger.generate_log(
             0000,

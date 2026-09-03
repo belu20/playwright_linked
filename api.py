@@ -124,12 +124,20 @@ if __name__ == '__main__':
                 print(f"[INFO] Start Crawling: {urllib.parse.unquote(keyword)}")
                 print("=" * 60)
                 
-                crawler.crawling(
-                    keyword=keyword,
-                    scroll=scroll,
-                    server_ip=server_ip,
-                    git_commit_id=git_commit_id
-                )
+                try:
+                    crawler.crawling(
+                        keyword=keyword,
+                        scroll=scroll,
+                        server_ip=server_ip,
+                        git_commit_id=git_commit_id
+                    )
+                except Exception as crawl_err:
+                    print(f"[ERROR] Crawling encountered an error: {crawl_err}")
+                    print("[INFO] Attempting driver restart for self-healing...")
+                    try:
+                        crawler.restart_driver()
+                    except Exception as rst_err:
+                        print(f"[ERROR] Failed to restart driver: {rst_err}")
 
                 keyword_counter += 1
                 if keyword_counter % RESTART_DRIVER_EVERY_N_KEYWORDS == 0:

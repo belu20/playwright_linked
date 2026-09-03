@@ -1,30 +1,30 @@
 services:
   linkedin-search:
-    image: "linkedin-search"
+    image: "linkedin-search-antam"
     build: .
-    container_name: linkedin-search
+    container_name: linkedin-search-antam
     restart: on-failure:5
     init: true
-    shm_size: "64mb"      # Chromium headless tidak butuh lebih dari 64MB (turun dari 700mb)
+    shm_size: "256mb"     # tmpfs limit aman untuk Chrome tanpa crash (hanya terpakai sesuai kebutuhan)
     mem_limit: 850m       # budget 4×850MB = 3.4GB, aman di 4GB RAM
-    cpus: 0.5             # 4×0.5 = 2.0 cpu, sesuai 2 core server
+    cpus: 0.5
     ports:
       - "1567:1567"
     env_file:
       - .env
     environment:
       - TYPE=keyword
-      - CLIENT_ID=49716 # PINDAHAN DB -- pastikan cocok dengan client_id akun di MongoDB
+      - CLIENT_ID=49590 # PINDAHAN DB -- pastikan cocok dengan client_id akun di MongoDB
       - LIMIT=300
       - SOURCE=linkedin
       - ID_TARGET=1
       - VM=VM-CRAWLING-ANTAM
       - PORT=1567
       - CHROME_PROFILE_ROOT=/app/chrome_profiles
-      - RESTART_DRIVER_EVERY_N_KEYWORDS=15
+      - RESTART_DRIVER_EVERY_N_KEYWORDS=7
     volumes:
       - /home/promtail/:/logs
-      - /data/chrome_profiles/client_49716:/app/chrome_profiles/client_49716
+      - /data/chrome_profiles/client_49590:/app/chrome_profiles/client_49590
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:1567/status"]
       interval: 30s
