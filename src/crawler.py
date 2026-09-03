@@ -47,47 +47,70 @@ class LinkedInCrawler:
             args=[
                 # --- Wajib untuk headless/container ---
                 '--no-sandbox',
+                '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',          # pakai /tmp bukan /dev/shm
                 '--disable-gpu',
                 '--disable-gpu-sandbox',
-                '--disable-impl-side-painting',
                 '--disable-accelerated-2d-canvas',
                 '--disable-accelerated-jpeg-decoding',
                 '--ignore-certificate-errors',
                 '--allow-running-insecure-content',
 
-                # --- Hemat CPU & RAM: stabil dan aman ---
+                # --- Hemat CPU & RAM: stabil dan aman tanpa bikin hang ---
                 '--renderer-process-limit=1',       # batasi maks 1 proses renderer
-                '--no-zygote',                      # kurangi proses fork tambahan
                 '--disable-extensions',
                 '--disable-background-networking',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-client-side-phishing-detection',
-                '--disable-default-apps',
-                '--disable-hang-monitor',
-                '--disable-popup-blocking',
-                '--disable-prompt-on-repost',
                 '--disable-sync',
                 '--disable-translate',
-                '--disable-features=BackForwardCache,TranslateUI,BlinkGenPropertyTrees',
                 '--metrics-recording-only',
                 '--mute-audio',
                 '--no-first-run',
                 '--safebrowsing-disable-auto-update',
                 '--test-type=ui',
 
-                # --- Hemat RAM renderer & JS heap ---
-                '--js-flags=--max-old-space-size=256',  # 256MB cukup aman untuk JS LinkedIn tanpa crash OOM
-                '--blink-settings=imagesEnabled=false', # tidak load gambar
+                # --- Cap heap JS agar hemat RAM tanpa crash OOM ---
+                '--js-flags=--max-old-space-size=256',
+
+                # --- Anti-Bot Detection: sembunyikan jejak automation ---
+                '--disable-blink-features=AutomationControlled',
             ],
-            viewport={"width": 800, "height": 600},   # lebih kecil = renderer lebih ringan
+            viewport={"width": 1024, "height": 768},
             user_agent=(
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                 'AppleWebKit/537.36 (KHTML, like Gecko) '
                 'Chrome/120.0.0.0 Safari/537.36'
             ),
         )
+
+        # Stealth evasion: Hapus flag navigator.webdriver dan mock fingerprint browser asli
+        self.context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en', 'id']
+            });
+        """)
+
+        # Hemat RAM & Bandwidth tanpa merusak gambar/DOM:
+        # Blokir video/streaming (media) yang memakan RAM & CPU decoder puluhan MB,
+        # tapi biarkan gambar tetap di-load agar lazy-load feed card & anti-bot berjalan normal.
+        def block_heavy_media(route):
+            if route.request.resource_type == "media":
+                route.abort()
+            else:
+                route.continue_()
+
+        self.context.route("**/*", block_heavy_media)
 
         # Gunakan halaman yang sudah ada atau buka halaman baru
         if self.context.pages:
@@ -538,14 +561,25 @@ class LinkedInCrawler:
             r'ShareUrn\(shareId=(\d{19})\)',
         ]
 
+        activity_patterns = [
+            r'urn:li:activity:(\d{19})',
+            r'activityId=(\d{19})',
+            r'data-chameleon-result-urn="urn:li:activity:(\d{19})"',
+            r'feed/update/urn:li:activity:(\d{19})',
+        ]
+
         ugc_ids = set()
         share_ids = set()
+        activity_ids = set()
 
         for pattern in ugc_patterns:
             ugc_ids.update(re.findall(pattern, src))
 
         for pattern in share_patterns:
             share_ids.update(re.findall(pattern, src))
+
+        for pattern in activity_patterns:
+            activity_ids.update(re.findall(pattern, src))
 
         for ugc_id in ugc_ids:
             raw_post_id = f"urn:li:ugcPost:{ugc_id}"
@@ -565,13 +599,25 @@ class LinkedInCrawler:
                 post_urls.append(url)
                 added += 1
 
+        for act_id in activity_ids:
+            raw_post_id = f"urn:li:activity:{act_id}"
+            url = f"https://www.linkedin.com/feed/update/{raw_post_id}/"
+
+            if url not in seen:
+                seen.add(url)
+                post_urls.append(url)
+                added += 1
+
         return added
 
     def save_debug_screenshot(self, name: str):
         os.makedirs(self.debug_dir, exist_ok=True)
         path = os.path.join(self.debug_dir, name)
-        self.page.screenshot(path=path)
-        print(f"[DEBUG] Saved screenshot: {path}")
+        try:
+            self.page.screenshot(path=path)
+            print(f"[DEBUG] Saved screenshot: {path}")
+        except Exception as e:
+            print(f"[DEBUG] Failed to save screenshot: {e}")
 
     def scroll_search_results(self) -> bool:
         moved = False
@@ -585,6 +631,14 @@ class LinkedInCrawler:
         except Exception as e:
             print(f"[DEBUG] workspace scroll failed: {e}")
 
+        # Fallback window scroll untuk layout baru LinkedIn (tanpa #workspace)
+        try:
+            self.page.evaluate("window.scrollBy(0, 1000);")
+            moved = True
+        except Exception as e:
+            print(f"[DEBUG] window scroll failed: {e}")
+
+        # Cek tombol "Load more" dengan timeout ketat (1500ms) agar tidak hang
         try:
             buttons = self.page.query_selector_all(
                 "xpath=//button[contains(., 'Load more') or contains(., 'Muat lebih banyak')]"
@@ -592,11 +646,11 @@ class LinkedInCrawler:
             for btn in buttons:
                 try:
                     if btn.is_visible() and btn.is_enabled():
-                        btn.scroll_into_view_if_needed()
-                        btn.click()
+                        btn.scroll_into_view_if_needed(timeout=1500)
+                        btn.click(timeout=1500)
                         return True
-                except Exception as e:
-                    print(f"[DEBUG] failed clicking one Load more button: {e}")
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[DEBUG] Load more lookup failed: {e}")
 
@@ -623,11 +677,15 @@ class LinkedInCrawler:
             print(f"[INFO] Search URL: {search_url}")
 
             try:
-                self.page.goto(search_url)
+                self.page.goto(search_url, timeout=45000)
                 self.page.wait_for_timeout(5000)
 
                 added = self.extract_update_urns_from_dom(post_urls, seen)
                 print(f"[INFO] Added {added} urls (initial), total unique={len(post_urls)}")
+
+                if len(post_urls) == 0:
+                    print(f"[INFO] Current page URL: {self.page.url}")
+                    self.save_debug_screenshot("debug_search_initial.png")
 
                 scroll_times = random.randint(5, 10)
                 print(f"[INFO] Randomly decided to scroll {scroll_times} times.")
@@ -635,7 +693,7 @@ class LinkedInCrawler:
                 for i in range(scroll_times):
                     try:
                         moved = self.scroll_search_results()
-                        self.page.wait_for_timeout(int(random.uniform(4, 10) * 1000))
+                        self.page.wait_for_timeout(int(random.uniform(3, 6) * 1000))
 
                         added = self.extract_update_urns_from_dom(post_urls, seen)
                         print(
