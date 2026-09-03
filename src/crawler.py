@@ -272,24 +272,24 @@ class LinkedInCrawler:
                         return el
                 return None
 
-            def fill_field(field, value, label):
-                field.scroll_into_view_if_needed()
-                self.page.wait_for_timeout(200)
-                # Isi field via JS native setter agar React/Vue state terupdate
-                self.page.evaluate(
-                    """
-                    ([el, val]) => {
-                        const setter = Object.getOwnPropertyDescriptor(
-                            window.HTMLInputElement.prototype, 'value'
-                        ).set;
-                        setter.call(el, val);
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                    """,
-                    [field, value],
-                )
-                print(f"[INFO] Field {label} filled (JS).")
+            def wait_and_fill(selector_list, value, label, timeout_ms=5000):
+                """
+                Tunggu field muncul lalu isi dengan click + type karakter per karakter
+                (mirip manusia, lebih susah dideteksi LinkedIn sebagai bot).
+                """
+                for sel in selector_list:
+                    try:
+                        self.page.wait_for_selector(sel, state="visible", timeout=timeout_ms)
+                        el = self.page.locator(sel).first
+                        el.click()
+                        el.fill("")           # clear dulu
+                        el.type(value, delay=50)  # ketik pelan-pelan
+                        print(f"[INFO] Field {label} filled with selector: {sel}")
+                        return True
+                    except Exception:
+                        continue
+                print(f"[WARNING] Field {label} not found with any selector.")
+                return False
 
             print("[INFO] Searching for username field...")
             username_field = find_first(username_selectors)
@@ -301,102 +301,87 @@ class LinkedInCrawler:
                     f.write(self.page.content())
                 print("[WARNING] Username field not found in page. Saved screenshot & HTML.")
             else:
-                password_field = find_first(password_selectors)
-                if password_field is None:
-                    print("[WARNING] Password field not found.")
-                else:
-                    # Fill fields
-                    fill_field(username_field, self.current_username, "username")
-                    fill_field(password_field, available_account["password"], "password")
+                # Isi username
+                wait_and_fill(username_selectors, self.current_username, "username")
 
-                    # Submit form
-                    try:
-                        password_field.press("Enter")
-                        print("[INFO] Enter key sent natively.")
-                    except Exception as e:
-                        print(f"[WARNING] Native Enter key failed ({type(e).__name__}), falling back to JS dispatch...")
-                        self.page.evaluate(
-                            """
-                            el => {
-                                el.focus();
-                                for (const type of ['keydown', 'keypress', 'keyup']) {
-                                    el.dispatchEvent(new KeyboardEvent(type, {
-                                        key: 'Enter',
-                                        code: 'Enter',
-                                        keyCode: 13,
-                                        which: 13,
-                                        bubbles: true,
-                                        cancelable: true,
-                                    }));
-                                }
-                            }
-                            """,
-                            password_field,
+                # Tekan Tab — pindah fokus ke password field secara natural,
+                # mentrigger onBlur/onChange LinkedIn agar form state valid.
+                self.page.keyboard.press("Tab")
+                self.page.wait_for_timeout(800)
+
+                # Debug screenshot setelah username diisi
+                os.makedirs(self.debug_dir, exist_ok=True)
+                self.page.screenshot(path=os.path.join(self.debug_dir, "debug_after_username.png"))
+
+                # Kursor sudah di password field (hasil Tab) — langsung ketik via keyboard
+                # JANGAN click/find element lagi karena akan merusak focus state.
+                print("[INFO] Typing password into focused field...")
+                self.page.keyboard.type(available_account["password"], delay=50)
+                print("[INFO] Password typed via keyboard.")
+
+                # Verifikasi password field terisi (opsional, untuk debug)
+                password_el = find_first(password_selectors)
+                if password_el:
+                    filled_len = self.page.evaluate("el => el.value.length", password_el)
+                    print(f"[INFO] Password field value length: {filled_len}")
+                    if filled_len == 0:
+                        print("[WARNING] Password field still empty after typing, saving debug...")
+                        self.page.screenshot(path=os.path.join(self.debug_dir, "debug_password_empty.png"))
+
+                # Submit — coba klik button submit, fallback ke Enter
+                submitted = False
+                try:
+                    submit_btn = self.page.query_selector("button[type='submit']")
+                    if submit_btn and submit_btn.is_visible():
+                        submit_btn.click()
+                        submitted = True
+                        print("[INFO] Submit button clicked.")
+                except Exception:
+                    pass
+
+                if not submitted:
+                    self.page.keyboard.press("Enter")
+                    print("[INFO] Enter key sent via keyboard.")
+
+                # Wait for redirection/challenge
+                self.page.wait_for_timeout(5000)
+
+                # Check for checkpoint/challenge
+                if "checkpoint/challenge" in self.page.url:
+                    print("\n=== VERIFICATION CHALLENGE (OTP) DETECTED ===")
+                    print("URL:", self.page.url)
+
+                    pin_selectors = [
+                        "#input__email_verification_pin",
+                        "input[name='pin']",
+                        "input.input_verification_pin",
+                    ]
+                    pin_field = find_first(pin_selectors)
+
+                    if pin_field is None:
+                        os.makedirs(self.debug_dir, exist_ok=True)
+                        self.page.screenshot(path=os.path.join(self.debug_dir, "debug_checkpoint_page.png"))
+                        with open(os.path.join(self.debug_dir, "debug_checkpoint_page.html"), "w", encoding="utf-8") as f:
+                            f.write(self.page.content())
+                        print("[WARNING] Verification PIN field not found. Saved checkpoint debug info.")
+                    else:
+                        print("[INFO] Mengambil kode OTP dari Gmail...")
+                        otp_code = get_linkedin_otp_from_gmail(
+                            gmail_user=os.getenv("GMAIL_USER"),
+                            gmail_app_password=os.getenv("GMAIL_APP_PASSWORD"),
+                            max_wait_seconds=90,
                         )
-                        print("[INFO] Enter key sent via JS dispatch.")
 
-                    # Wait for redirection/challenge
-                    self.page.wait_for_timeout(5000)
-
-                    # Check for checkpoint/challenge
-                    if "checkpoint/challenge" in self.page.url:
-                        print("\n=== VERIFICATION CHALLENGE (OTP) DETECTED ===")
-                        print("URL:", self.page.url)
-
-                        pin_selectors = [
-                            "#input__email_verification_pin",
-                            "input[name='pin']",
-                            "input.input_verification_pin",
-                        ]
-                        pin_field = find_first(pin_selectors)
-
-                        if pin_field is None:
+                        if otp_code is None:
+                            print("[WARNING] OTP tidak ditemukan dari Gmail dalam batas waktu. Skip pengisian OTP.")
                             os.makedirs(self.debug_dir, exist_ok=True)
-                            self.page.screenshot(path=os.path.join(self.debug_dir, "debug_checkpoint_page.png"))
-                            with open(os.path.join(self.debug_dir, "debug_checkpoint_page.html"), "w", encoding="utf-8") as f:
-                                f.write(self.page.content())
-                            print("[WARNING] Verification PIN field not found. Saved checkpoint debug info.")
+                            self.page.screenshot(path=os.path.join(self.debug_dir, "debug_otp_timeout.png"))
                         else:
-                            print("[INFO] Mengambil kode OTP dari Gmail...")
-                            otp_code = get_linkedin_otp_from_gmail(
-                                gmail_user=os.getenv("GMAIL_USER"),
-                                gmail_app_password=os.getenv("GMAIL_APP_PASSWORD"),
-                                max_wait_seconds=90,
-                            )
-
-                            if otp_code is None:
-                                print("[WARNING] OTP tidak ditemukan dari Gmail dalam batas waktu. Skip pengisian OTP.")
-                                os.makedirs(self.debug_dir, exist_ok=True)
-                                self.page.screenshot(path=os.path.join(self.debug_dir, "debug_otp_timeout.png"))
-                            else:
-                                print(f"[INFO] OTP ditemukan: {otp_code}")
-                                fill_field(pin_field, otp_code, "kode OTP")
-
-                                try:
-                                    pin_field.press("Enter")
-                                    print("[INFO] Enter key sent natively for OTP.")
-                                except Exception as e:
-                                    print(f"[WARNING] Native Enter for OTP failed ({type(e).__name__}), falling back to JS dispatch...")
-                                    self.page.evaluate(
-                                        """
-                                        el => {
-                                            el.focus();
-                                            for (const type of ['keydown', 'keypress', 'keyup']) {
-                                                el.dispatchEvent(new KeyboardEvent(type, {
-                                                    key: 'Enter',
-                                                    code: 'Enter',
-                                                    keyCode: 13,
-                                                    which: 13,
-                                                    bubbles: true,
-                                                    cancelable: true,
-                                                }));
-                                            }
-                                        }
-                                        """,
-                                        pin_field,
-                                    )
-                                print("[INFO] Enter key sent via JS dispatch for OTP.")
-                            self.page.wait_for_timeout(5000)
+                            print(f"[INFO] OTP ditemukan: {otp_code}")
+                            wait_and_fill(pin_selectors, otp_code, "kode OTP")
+                            self.page.keyboard.press("Enter")
+                            print("[INFO] Enter key sent for OTP.")
+                        self.page.wait_for_timeout(5000)
 
         except Exception as e:
             print(f"[DEBUG] Error pas isi form / OTP: {e}")
@@ -408,20 +393,29 @@ class LinkedInCrawler:
         print("[INFO] Waiting for user to complete login/captcha in the browser...")
 
         while time.time() - start_wait < timeout:
-            current_url = self.page.url
-            if "linkedin.com/feed" in current_url:
-                logged_in = True
-                break
+            try:
+                current_url = self.page.url
+                if "linkedin.com/feed" in current_url:
+                    logged_in = True
+                    break
 
-            global_nav = self.page.query_selector('.global-nav')
-            if global_nav:
-                logged_in = True
-                break
+                global_nav = self.page.query_selector('.global-nav')
+                if global_nav:
+                    logged_in = True
+                    break
 
-            elapsed = int(time.time() - start_wait)
-            if elapsed % 10 == 0:
-                print(f"[INFO] Waiting for login/captcha completion... ({elapsed}s elapsed)")
-            self.page.wait_for_timeout(2000)
+                elapsed = int(time.time() - start_wait)
+                if elapsed % 10 == 0:
+                    print(f"[INFO] Waiting for login/captcha completion... ({elapsed}s elapsed)")
+                self.page.wait_for_timeout(2000)
+
+            except Exception as nav_err:
+                # Page sedang navigasi/redirect (misal setelah submit login).
+                # "Execution context was destroyed" adalah hal normal saat redirect.
+                # Tunggu sebentar lalu cek ulang di iterasi berikutnya.
+                print(f"[INFO] Page is navigating, waiting... ({nav_err})")
+                self.page.wait_for_timeout(1500)
+                continue
 
         if logged_in:
             print("[INFO] Login success detected!")

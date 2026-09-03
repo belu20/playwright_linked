@@ -1,4 +1,4 @@
-playwright
+playwright==1.52.0
 requests
 pymongo==4
 moment
