@@ -1,10 +1,11 @@
 playwright==1.52.0
-requests
-pymongo==4
-moment
-beautifulsoup4
-confluent_kafka
-flask
-flask_cors
-python-dotenv
-pytz
+requests==2.32.3
+pymongo==4.10.1
+moment==0.12.1
+beautifulsoup4==4.12.3
+confluent_kafka==2.8.0
+flask==3.1.0
+flask_cors==5.0.0
+python-dotenv==1.0.1
+pytz==2024.2
+lxml==5.3.0        # parser BeautifulSoup lebih cepat dari html.parser

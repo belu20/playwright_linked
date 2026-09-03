@@ -1,5 +1,10 @@
 FROM python:3.11-slim
 
+# Env vars Python: jangan tulis .pyc ke disk, stdout langsung flush
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=random
+
 # Setup tmp (biar aman di container)
 RUN mkdir -p /tmp && chmod 1777 /tmp
 ENV TMPDIR=/tmp
@@ -7,7 +12,6 @@ ENV TMPDIR=/tmp
 # Install system dependencies yang dibutuhkan Playwright Chromium
 # (shared libs untuk proses Chrome bisa start di headless mode)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
     curl \
     ca-certificates \
     fonts-liberation \

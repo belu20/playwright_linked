@@ -45,20 +45,43 @@ class LinkedInCrawler:
             profile_dir,
             headless=True,
             args=[
+                # --- Wajib untuk headless/container ---
                 '--no-sandbox',
+                '--disable-dev-shm-usage',          # pakai /tmp bukan /dev/shm
                 '--disable-gpu',
-                '--disable-impl-side-painting',
                 '--disable-gpu-sandbox',
+                '--disable-impl-side-painting',
                 '--disable-accelerated-2d-canvas',
                 '--disable-accelerated-jpeg-decoding',
-                '--test-type=ui',
-                '--disable-dev-shm-usage',
                 '--ignore-certificate-errors',
                 '--allow-running-insecure-content',
-                '--disable-features=BackForwardCache',
-                '--renderer-process-limit=4',
+
+                # --- Hemat CPU & RAM: matikan fitur berat ---
+                '--single-process',                 # 1 proses Chrome, hemat ~100-150MB RAM
+                '--renderer-process-limit=1',       # maks 1 renderer process
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-client-side-phishing-detection',
+                '--disable-default-apps',
+                '--disable-hang-monitor',
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-features=BackForwardCache,TranslateUI,BlinkGenPropertyTrees',
+                '--metrics-recording-only',
+                '--mute-audio',
+                '--no-first-run',
+                '--safebrowsing-disable-auto-update',
+                '--test-type=ui',
+
+                # --- Hemat RAM renderer & JS heap ---
+                '--js-flags=--max-old-space-size=128',  # cap heap JS di 128MB
+                '--blink-settings=imagesEnabled=false', # tidak load gambar
             ],
-            viewport={"width": 1024, "height": 800},
+            viewport={"width": 800, "height": 600},   # lebih kecil = renderer lebih ringan
             user_agent=(
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                 'AppleWebKit/537.36 (KHTML, like Gecko) '
