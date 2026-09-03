@@ -1,4 +1,4 @@
-selenium==4.0.0
+playwright
 requests
 pymongo==4
 moment
@@ -7,5 +7,4 @@ confluent_kafka
 flask
 flask_cors
 python-dotenv
-webdriver-manager
 pytz

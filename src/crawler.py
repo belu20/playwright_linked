@@ -8,15 +8,10 @@ import requests
 from bs4 import BeautifulSoup
 import moment
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.keys import Keys
-#from webdriver_manager.chrome import ChromeDriverManager
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from src.gmail_otp_fetcher import get_linkedin_otp_from_gmail
+
 
 class LinkedInCrawler:
     def __init__(self, account_manager, logger, publisher, client_id: int):
@@ -25,56 +20,79 @@ class LinkedInCrawler:
         self.publisher = publisher
         self.client_id = client_id
 
-        self.driver = None
+        self.playwright = None
+        self.context = None
+        self.page = None
         self.current_username = None
         self.start_time = time.time()
         self.debug_dir = "debug_image"
 
     def init_driver(self):
-        chrome_options = webdriver.ChromeOptions()
-
-        # Persist Chrome profile (cookies, local storage, session) per client_id
-        # so restarting the driver to free memory does NOT force a re-login.
-        # IMPORTANT: this directory must map 1:1 to a single account (client_id),
-        # never shared between different accounts/client_ids.
+        """
+        Inisialisasi Playwright dengan persistent context (setara --user-data-dir
+        pada Selenium) sehingga session/cookie tetap tersimpan di disk dan tidak
+        perlu login ulang setiap kali driver di-restart.
+        """
         profile_dir = os.path.join(
             os.environ.get("CHROME_PROFILE_ROOT", "/app/chrome_profiles"),
             f"client_{self.client_id}"
         )
         os.makedirs(profile_dir, exist_ok=True)
-        chrome_options.add_argument(f'--user-data-dir={profile_dir}')
 
-        chrome_options.add_argument('--headless=new')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-impl-side-painting')
-        chrome_options.add_argument('--disable-gpu-sandbox')
-        chrome_options.add_argument('--disable-accelerated-2d-canvas')
-        chrome_options.add_argument('--disable-accelerated-jpeg-decoding')
-        chrome_options.add_argument('--test-type=ui')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--ignore-certificate-errors')
-        chrome_options.add_argument('--allow-running-insecure-content')
-        chrome_options.add_argument('--window-size=1024x800')
-        chrome_options.add_argument('--disable-features=BackForwardCache')
-        chrome_options.add_argument('--renderer-process-limit=4')
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        chrome_options.add_argument('--disable-features=BackForwardCache')
-        chrome_options.add_argument('--renderer-process-limit=4')
+        self.playwright = sync_playwright().start()
 
-        self.driver = webdriver.Chrome(service=Service(executable_path="/usr/bin/chromedriver"), options=chrome_options)
+        self.context = self.playwright.chromium.launch_persistent_context(
+            profile_dir,
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-gpu',
+                '--disable-impl-side-painting',
+                '--disable-gpu-sandbox',
+                '--disable-accelerated-2d-canvas',
+                '--disable-accelerated-jpeg-decoding',
+                '--test-type=ui',
+                '--disable-dev-shm-usage',
+                '--ignore-certificate-errors',
+                '--allow-running-insecure-content',
+                '--disable-features=BackForwardCache',
+                '--renderer-process-limit=4',
+            ],
+            viewport={"width": 1024, "height": 800},
+            user_agent=(
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            ),
+        )
 
-        #self.driver = webdriver.Chrome(options=chrome_options)
-        #self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+        # Gunakan halaman yang sudah ada atau buka halaman baru
+        if self.context.pages:
+            self.page = self.context.pages[0]
+        else:
+            self.page = self.context.new_page()
 
     def close_driver(self):
-        if self.driver:
+        if self.page:
             try:
-                self.driver.close()
-                self.driver.quit()
+                self.page.close()
             except Exception as e:
-                print(f"[WARNING] Error closing driver: {e}")
-            self.driver = None
+                print(f"[WARNING] Error closing page: {e}")
+            self.page = None
+
+        if self.context:
+            try:
+                self.context.close()
+            except Exception as e:
+                print(f"[WARNING] Error closing context: {e}")
+            self.context = None
+
+        if self.playwright:
+            try:
+                self.playwright.stop()
+            except Exception as e:
+                print(f"[WARNING] Error stopping playwright: {e}")
+            self.playwright = None
 
     def cleanup_chrome_profile_cache(self):
         """
@@ -133,14 +151,14 @@ class LinkedInCrawler:
 
     def restart_driver(self, cleanup_cache: bool = True):
         """
-        Restart Chrome untuk melepas memory yang menumpuk selama crawling
-        panjang. Session tidak hilang karena user-data-dir persist di disk,
+        Restart browser untuk melepas memory yang menumpuk selama crawling
+        panjang. Session tidak hilang karena persistent context tersimpan di disk,
         jadi cukup restore_session() tanpa perlu login form ulang.
 
         cleanup_cache: kalau True, jalankan housekeeping hapus folder cache
         (aman untuk session) sebelum driver dibuka lagi.
         """
-        print("[INFO] Restarting Chrome driver to free up memory...")
+        print("[INFO] Restarting browser to free up memory...")
         self.close_driver()
 
         if cleanup_cache:
@@ -154,42 +172,35 @@ class LinkedInCrawler:
 
     def dummy_wait(self, wait_time: int):
         print(f"[INFO] Waiting for {wait_time} second...")
-        try:
-            wait = WebDriverWait(self.driver, wait_time)
-            wait.until(EC.visibility_of_element_located((By.XPATH, "ul")))
-        except Exception:
-            pass
+        self.page.wait_for_timeout(wait_time * 1000)
 
     def logout(self) -> str:
         try:
-            self.driver.get("https://www.linkedin.com/m/logout/")
+            self.page.goto("https://www.linkedin.com/m/logout/")
         except Exception as e:
             print("[INFO] Logout failed", e)
-            pass
-        return str(self.driver.page_source)
+        return self.page.content()
 
     def restore_session(self) -> bool:
         """
-        Cek apakah profile Chrome yang sudah persist (user-data-dir)
-        masih punya session LinkedIn yang valid, tanpa perlu isi form login.
+        Cek apakah profile yang sudah persist masih punya session LinkedIn
+        yang valid, tanpa perlu isi form login.
         Return True kalau session masih valid, False kalau perlu login penuh.
         """
         try:
-            self.driver.get("https://www.linkedin.com/feed")
+            self.page.goto("https://www.linkedin.com/feed")
             self.dummy_wait(5)
 
-            if "linkedin.com/feed" in self.driver.current_url:
-                print("[INFO] Session restored from existing Chrome profile.")
+            if "linkedin.com/feed" in self.page.url:
+                print("[INFO] Session restored from existing profile.")
                 return True
 
-            try:
-                self.driver.find_element(By.CLASS_NAME, 'global-nav')
-                print("[INFO] Session restored from existing Chrome profile.")
+            global_nav = self.page.query_selector('.global-nav')
+            if global_nav:
+                print("[INFO] Session restored from existing profile.")
                 return True
-            except Exception:
-                pass
 
-            print("[INFO] No valid session found in Chrome profile, full login required.")
+            print("[INFO] No valid session found in profile, full login required.")
             return False
         except Exception as e:
             print(f"[WARNING] Failed while checking restored session: {e}")
@@ -228,23 +239,15 @@ class LinkedInCrawler:
             return 0
 
         self.current_username = available_account['username']
-        # Set account in use
-        #accounts = self.account_manager.load_accounts()
-        #for acc in accounts:
-        #    if acc.get("username") == self.current_username:
-        #        acc["in_use"] = True
-        #self.account_manager.save_accounts(accounts)
 
-        # Coba pakai session yang sudah persist di Chrome profile (user-data-dir)
-        # dulu sebelum isi form login manual. Ini menghindari re-login/OTP
-        # setiap kali driver di-restart untuk menekan memory.
+        # Coba pakai session yang sudah persist dulu sebelum isi form login manual.
         if self.restore_session():
             print("[INFO] Finish login (restored from profile, no form-fill needed)")
             return 1
 
         try:
             print(f"[INFO] Start login with username: {self.current_username}")
-            self.driver.get("https://www.linkedin.com/login")
+            self.page.goto("https://www.linkedin.com/login")
             self.dummy_wait(5)
 
             # Selectors
@@ -264,27 +267,27 @@ class LinkedInCrawler:
 
             def find_first(selectors):
                 for sel in selectors:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, sel)
-                    if elements:
-                        return elements[0]
+                    el = self.page.query_selector(sel)
+                    if el:
+                        return el
                 return None
 
             def fill_field(field, value, label):
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView({block: 'center'});", field
-                )
-                time.sleep(0.2)
-                self.driver.execute_script(
+                field.scroll_into_view_if_needed()
+                self.page.wait_for_timeout(200)
+                # Isi field via JS native setter agar React/Vue state terupdate
+                self.page.evaluate(
                     """
-                    const el = arguments[0];
-                    const val = arguments[1];
-                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                    setter.call(el, val);
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    ([el, val]) => {
+                        const setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLInputElement.prototype, 'value'
+                        ).set;
+                        setter.call(el, val);
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
                     """,
-                    field,
-                    value,
+                    [field, value],
                 )
                 print(f"[INFO] Field {label} filled (JS).")
 
@@ -293,9 +296,9 @@ class LinkedInCrawler:
             if username_field is None:
                 # Save screenshot + HTML source for debugging if username field not found
                 os.makedirs(self.debug_dir, exist_ok=True)
-                self.driver.save_screenshot(os.path.join(self.debug_dir, "debug_login_page.png"))
+                self.page.screenshot(path=os.path.join(self.debug_dir, "debug_login_page.png"))
                 with open(os.path.join(self.debug_dir, "debug_login_page.html"), "w", encoding="utf-8") as f:
-                    f.write(self.driver.page_source)
+                    f.write(self.page.content())
                 print("[WARNING] Username field not found in page. Saved screenshot & HTML.")
             else:
                 password_field = find_first(password_selectors)
@@ -307,25 +310,25 @@ class LinkedInCrawler:
                     fill_field(password_field, available_account["password"], "password")
 
                     # Submit form
-                    from selenium.webdriver.common.keys import Keys
                     try:
-                        password_field.send_keys(Keys.RETURN)
+                        password_field.press("Enter")
                         print("[INFO] Enter key sent natively.")
                     except Exception as e:
                         print(f"[WARNING] Native Enter key failed ({type(e).__name__}), falling back to JS dispatch...")
-                        self.driver.execute_script(
+                        self.page.evaluate(
                             """
-                            const el = arguments[0];
-                            el.focus();
-                            for (const type of ['keydown', 'keypress', 'keyup']) {
-                                el.dispatchEvent(new KeyboardEvent(type, {
-                                    key: 'Enter',
-                                    code: 'Enter',
-                                    keyCode: 13,
-                                    which: 13,
-                                    bubbles: true,
-                                    cancelable: true,
-                                }));
+                            el => {
+                                el.focus();
+                                for (const type of ['keydown', 'keypress', 'keyup']) {
+                                    el.dispatchEvent(new KeyboardEvent(type, {
+                                        key: 'Enter',
+                                        code: 'Enter',
+                                        keyCode: 13,
+                                        which: 13,
+                                        bubbles: true,
+                                        cancelable: true,
+                                    }));
+                                }
                             }
                             """,
                             password_field,
@@ -333,12 +336,12 @@ class LinkedInCrawler:
                         print("[INFO] Enter key sent via JS dispatch.")
 
                     # Wait for redirection/challenge
-                    time.sleep(5)
+                    self.page.wait_for_timeout(5000)
 
                     # Check for checkpoint/challenge
-                    if "checkpoint/challenge" in self.driver.current_url:
+                    if "checkpoint/challenge" in self.page.url:
                         print("\n=== VERIFICATION CHALLENGE (OTP) DETECTED ===")
-                        print("URL:", self.driver.current_url)
+                        print("URL:", self.page.url)
 
                         pin_selectors = [
                             "#input__email_verification_pin",
@@ -349,9 +352,9 @@ class LinkedInCrawler:
 
                         if pin_field is None:
                             os.makedirs(self.debug_dir, exist_ok=True)
-                            self.driver.save_screenshot(os.path.join(self.debug_dir, "debug_checkpoint_page.png"))
+                            self.page.screenshot(path=os.path.join(self.debug_dir, "debug_checkpoint_page.png"))
                             with open(os.path.join(self.debug_dir, "debug_checkpoint_page.html"), "w", encoding="utf-8") as f:
-                                f.write(self.driver.page_source)
+                                f.write(self.page.content())
                             print("[WARNING] Verification PIN field not found. Saved checkpoint debug info.")
                         else:
                             print("[INFO] Mengambil kode OTP dari Gmail...")
@@ -364,35 +367,36 @@ class LinkedInCrawler:
                             if otp_code is None:
                                 print("[WARNING] OTP tidak ditemukan dari Gmail dalam batas waktu. Skip pengisian OTP.")
                                 os.makedirs(self.debug_dir, exist_ok=True)
-                                self.driver.save_screenshot(os.path.join(self.debug_dir, "debug_otp_timeout.png"))
+                                self.page.screenshot(path=os.path.join(self.debug_dir, "debug_otp_timeout.png"))
                             else:
                                 print(f"[INFO] OTP ditemukan: {otp_code}")
                                 fill_field(pin_field, otp_code, "kode OTP")
 
                                 try:
-                                    pin_field.send_keys(Keys.RETURN)
+                                    pin_field.press("Enter")
                                     print("[INFO] Enter key sent natively for OTP.")
                                 except Exception as e:
                                     print(f"[WARNING] Native Enter for OTP failed ({type(e).__name__}), falling back to JS dispatch...")
-                                    self.driver.execute_script(
+                                    self.page.evaluate(
                                         """
-                                        const el = arguments[0];
-                                        el.focus();
-                                        for (const type of ['keydown', 'keypress', 'keyup']) {
-                                            el.dispatchEvent(new KeyboardEvent(type, {
-                                                key: 'Enter',
-                                                code: 'Enter',
-                                                keyCode: 13,
-                                                which: 13,
-                                                bubbles: true,
-                                                cancelable: true,
-                                            }));
+                                        el => {
+                                            el.focus();
+                                            for (const type of ['keydown', 'keypress', 'keyup']) {
+                                                el.dispatchEvent(new KeyboardEvent(type, {
+                                                    key: 'Enter',
+                                                    code: 'Enter',
+                                                    keyCode: 13,
+                                                    which: 13,
+                                                    bubbles: true,
+                                                    cancelable: true,
+                                                }));
+                                            }
                                         }
                                         """,
                                         pin_field,
                                     )
                                 print("[INFO] Enter key sent via JS dispatch for OTP.")
-                            time.sleep(5)
+                            self.page.wait_for_timeout(5000)
 
         except Exception as e:
             print(f"[DEBUG] Error pas isi form / OTP: {e}")
@@ -404,38 +408,34 @@ class LinkedInCrawler:
         print("[INFO] Waiting for user to complete login/captcha in the browser...")
 
         while time.time() - start_wait < timeout:
-            current_url = self.driver.current_url
+            current_url = self.page.url
             if "linkedin.com/feed" in current_url:
                 logged_in = True
                 break
-            try:
-                # global-nav is only visible when logged in
-                self.driver.find_element(By.CLASS_NAME, 'global-nav')
+
+            global_nav = self.page.query_selector('.global-nav')
+            if global_nav:
                 logged_in = True
                 break
-            except Exception:
-                pass
 
             elapsed = int(time.time() - start_wait)
             if elapsed % 10 == 0:
                 print(f"[INFO] Waiting for login/captcha completion... ({elapsed}s elapsed)")
-            time.sleep(2)
+            self.page.wait_for_timeout(2000)
 
         if logged_in:
             print("[INFO] Login success detected!")
         else:
             print("[WARNING] Login timeout reached.")
 
-        self.driver.get("https://www.linkedin.com/")
+        self.page.goto("https://www.linkedin.com/")
         self.dummy_wait(3)
-        # print("[DEBUG] ========================= RENDER TEST")
-        # page = self.driver.find_element(By.XPATH, "//html").get_attribute("innerText")
-        # print(page)
-        # print("[DEBUG] ========================= RENDER TEST")
 
         found = None
         try:
-            found = self.driver.find_element(By.CLASS_NAME, 'nav__button-secondary').text
+            btn = self.page.query_selector('.nav__button-secondary')
+            if btn:
+                found = btn.inner_text()
             print("[INFO] Found =>", found)
         except Exception:
             pass
@@ -462,12 +462,14 @@ class LinkedInCrawler:
 
     def check_login_status(self) -> dict:
         print("[INFO] Check login status")
-        self.driver.get("http://www.linkedin.com")
+        self.page.goto("http://www.linkedin.com")
 
         is_login = True
         found = None
         try:
-            found = self.driver.find_element(By.CLASS_NAME, 'nav__button-secondary').text
+            btn = self.page.query_selector('.nav__button-secondary')
+            if btn:
+                found = btn.inner_text()
         except Exception:
             pass
 
@@ -499,13 +501,13 @@ class LinkedInCrawler:
                 print("[INFO] Relogin..")
                 do_login = self.login()
                 print(f"[INFO] Do relogin again {do_login}")
-                time.sleep(3)
+                self.page.wait_for_timeout(3000)
             except Exception as e:
                 print("[ERROR] Failed login:", e)
 
     def extract_update_urns_from_dom(self, post_urls: list, seen: set) -> int:
         added = 0
-        src = self.driver.page_source or ""
+        src = self.page.content() or ""
 
         ugc_patterns = [
             r'userGeneratedContentId=(\d{19})',
@@ -551,30 +553,30 @@ class LinkedInCrawler:
     def save_debug_screenshot(self, name: str):
         os.makedirs(self.debug_dir, exist_ok=True)
         path = os.path.join(self.debug_dir, name)
-        self.driver.save_screenshot(path)
+        self.page.screenshot(path=path)
         print(f"[DEBUG] Saved screenshot: {path}")
 
     def scroll_search_results(self) -> bool:
         moved = False
         try:
-            workspace = self.driver.find_element(By.ID, "workspace")
-            before = self.driver.execute_script("return arguments[0].scrollTop", workspace)
-            self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollTop + 1200;", workspace)
-            after = self.driver.execute_script("return arguments[0].scrollTop", workspace)
-            moved = after > before
+            workspace = self.page.query_selector("#workspace")
+            if workspace:
+                before = self.page.evaluate("el => el.scrollTop", workspace)
+                self.page.evaluate("el => { el.scrollTop = el.scrollTop + 1200; }", workspace)
+                after = self.page.evaluate("el => el.scrollTop", workspace)
+                moved = after > before
         except Exception as e:
             print(f"[DEBUG] workspace scroll failed: {e}")
 
         try:
-            buttons = self.driver.find_elements(
-                By.XPATH,
-                "//button[contains(., 'Load more') or contains(., 'Muat lebih banyak')]"
+            buttons = self.page.query_selector_all(
+                "xpath=//button[contains(., 'Load more') or contains(., 'Muat lebih banyak')]"
             )
             for btn in buttons:
                 try:
-                    if btn.is_displayed() and btn.is_enabled():
-                        self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                        self.driver.execute_script("arguments[0].click();", btn)
+                    if btn.is_visible() and btn.is_enabled():
+                        btn.scroll_into_view_if_needed()
+                        btn.click()
                         return True
                 except Exception as e:
                     print(f"[DEBUG] failed clicking one Load more button: {e}")
@@ -604,8 +606,8 @@ class LinkedInCrawler:
             print(f"[INFO] Search URL: {search_url}")
 
             try:
-                self.driver.get(search_url)
-                time.sleep(5)
+                self.page.goto(search_url)
+                self.page.wait_for_timeout(5000)
 
                 added = self.extract_update_urns_from_dom(post_urls, seen)
                 print(f"[INFO] Added {added} urls (initial), total unique={len(post_urls)}")
@@ -616,7 +618,7 @@ class LinkedInCrawler:
                 for i in range(scroll_times):
                     try:
                         moved = self.scroll_search_results()
-                        time.sleep(random.uniform(4, 10))
+                        self.page.wait_for_timeout(int(random.uniform(4, 10) * 1000))
 
                         added = self.extract_update_urns_from_dom(post_urls, seen)
                         print(
@@ -652,11 +654,11 @@ class LinkedInCrawler:
 
                 if "telescopeScope" in raw_html:
                     print("\033[33m[INFO] Private post found.\033[0m")
-                    print("\033[33m[INFO] Starting to get URL with driver.\033[0m")
-                    self.driver.get(url)
+                    print("\033[33m[INFO] Starting to get URL with browser.\033[0m")
+                    self.page.goto(url)
                     self.dummy_wait(5)
-                    soup = BeautifulSoup(str(self.driver.page_source), 'html.parser')
-                    mode = "selenium"
+                    soup = BeautifulSoup(self.page.content(), 'html.parser')
+                    mode = "playwright"
                 else:
                     soup = BeautifulSoup(raw_html, 'html.parser')
                     mode = "requests"
@@ -735,24 +737,31 @@ class LinkedInCrawler:
                     except Exception:
                         post_time_datetimems = None
 
-                # SELENIUM
-                elif mode == "selenium":
+                # PLAYWRIGHT (private post)
+                elif mode == "playwright":
                     content_str = None
                     limited_content = ""
+
                     def print_blue(text):
                         print("\033[34m" + text + "\033[0m")
 
                     try:
-                        content_str = self.driver.find_element(By.XPATH, "//*[contains(@class, 'update-components-text')]").text.strip()
-                        content_str = content_str.replace("Tagar", "").strip()
-                        words = content_str.split()[:20]
-                        limited_content = ' '.join(words) + "..."
+                        el = self.page.query_selector("[class*='update-components-text']")
+                        if el:
+                            content_str = el.inner_text().strip()
+                            content_str = content_str.replace("Tagar", "").strip()
+                            words = content_str.split()[:20]
+                            limited_content = ' '.join(words) + "..."
                     except Exception as e:
                         print("[ERROR] Failed to get content:", e)
                     print_blue(f"[DEBUG] Post content: {limited_content}")
 
                     try:
-                        comment_count = self.driver.find_element(By.XPATH, "//li[contains(@class, 'social-details-social-counts__comments')]//button//span[@aria-hidden='true']").text.replace(" Comments", "").replace(" Comment", "").replace(" Komentar", "").replace("\n", "").replace(",", "").strip()
+                        el = self.page.query_selector(
+                            "xpath=//li[contains(@class, 'social-details-social-counts__comments')]"
+                            "//button//span[@aria-hidden='true']"
+                        )
+                        comment_count = el.inner_text().replace(" Comments", "").replace(" Comment", "").replace(" Komentar", "").replace("\n", "").replace(",", "").strip() if el else 0
                     except Exception:
                         comment_count = 0
                     print_blue(f"[DEBUG] Post comments: {comment_count}")
@@ -765,39 +774,61 @@ class LinkedInCrawler:
                     print_blue(f"[DEBUG] Post hashtags: {hashtag[:6]}")
 
                     try:
-                        reaction_count = self.driver.find_element(By.XPATH, "//*[contains(@class, 'social-details-social-counts__reactions-count')]").text
+                        el = self.page.query_selector("[class*='social-details-social-counts__reactions-count']")
+                        reaction_count = el.inner_text() if el else 0
                     except Exception:
                         reaction_count = 0
                     print_blue(f"[DEBUG] Post reactions: {reaction_count}")
 
                     try:
-                        post_owner_name = self.driver.find_element(By.XPATH, "//*[contains(@class, 'update-components-actor__single-line-truncate')]").text.replace("\n", "").strip()
+                        el = self.page.query_selector("[class*='update-components-actor__single-line-truncate']")
+                        post_owner_name = el.inner_text().replace("\n", "").strip() if el else None
                     except Exception:
                         post_owner_name = None
                     print_blue(f"[DEBUG] Post owner name: {post_owner_name}")
 
                     try:
-                        post_owner_url = self.driver.find_element(By.XPATH, "//a[contains(@class, 'update-components-actor__meta-link')]").get_attribute("href")
+                        el = self.page.query_selector("a[class*='update-components-actor__meta-link']")
+                        if el:
+                            post_owner_url = el.get_attribute("href")
+                        else:
+                            el = self.page.query_selector("a[class*='update-components-actor__image']")
+                            post_owner_url = el.get_attribute("href") if el else None
                     except Exception:
-                        post_owner_url = self.driver.find_element(By.XPATH, "//a[contains(@class, 'update-components-actor__image')]").get_attribute("href")
+                        post_owner_url = None
                     print_blue(f"[DEBUG] Post owner url: {post_owner_url}")
 
                     try:
-                        post_owner_headline = self.driver.find_element(By.XPATH, "//*[contains(@class, 'update-components-actor__description') and contains(@class, 'text-body-xsmall')]").text.replace("\n", "").strip()
-                        if "•" in post_owner_headline:
+                        el = self.page.query_selector(
+                            "[class*='update-components-actor__description'][class*='text-body-xsmall']"
+                        )
+                        if el:
+                            post_owner_headline = el.inner_text().replace("\n", "").strip()
+                            if "•" in post_owner_headline:
+                                post_owner_headline = None
+                        else:
                             post_owner_headline = None
                     except Exception:
                         post_owner_headline = None
                     print_blue(f"[DEBUG] Post owner headline: {post_owner_headline}")
 
                     try:
-                        post_owner_pic = self.driver.find_element(By.XPATH, "//span[@class='js-update-components-actor__avatar']//img").get_attribute("src")
+                        el = self.page.query_selector(
+                            "span.js-update-components-actor__avatar img"
+                        )
+                        post_owner_pic = el.get_attribute("src") if el else None
                     except Exception:
                         post_owner_pic = None
                     print_blue(f"[DEBUG] Post owner pic: {post_owner_pic}")
 
                     try:
-                        post_time_str = self.driver.find_element(By.XPATH, "//*[contains(@class, 'update-components-actor__sub-description') and contains(@class, 'text-body-xsmall')]").text.split(" •")[0].replace(" • Edited •   ", "").replace(" • Diedit •   ", "").replace("\n", "").strip()
+                        el = self.page.query_selector(
+                            "[class*='update-components-actor__sub-description'][class*='text-body-xsmall']"
+                        )
+                        if el:
+                            post_time_str = el.inner_text().split(" •")[0].replace(" • Edited •   ", "").replace(" • Diedit •   ", "").replace("\n", "").strip()
+                        else:
+                            post_time_str = None
                     except Exception:
                         post_time_str = None
                     print_blue(f"[DEBUG] Post date: {post_time_str}")
@@ -876,7 +907,7 @@ class LinkedInCrawler:
 
             except Exception as e:
                 print("[ERROR] Reason:", e)
-            time.sleep(2)
+            self.page.wait_for_timeout(2000)
 
         self.logger.generate_log(
             0000,
