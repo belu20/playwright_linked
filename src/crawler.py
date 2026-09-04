@@ -648,9 +648,17 @@ class LinkedInCrawler:
         page_count = 0
         seen = set()
 
+        keyword_start_time = time.time()
+        MAX_KEYWORD_DURATION_SECONDS = 300  # Maksimal 5 menit per keyword (anti-hang mutlak)
+
         print(f"[INFO] Search Query: {urllib.parse.unquote(keyword)}")
 
         while True:
+            # Cegah hang tak terbatas di search pagination
+            if time.time() - keyword_start_time > MAX_KEYWORD_DURATION_SECONDS:
+                print(f"[WARNING] Keyword '{keyword}' search exceeded {MAX_KEYWORD_DURATION_SECONDS}s. Forcing break.")
+                break
+
             page_count += 1
             search_url = (
                 "https://www.linkedin.com/search/results/content/?keywords="
@@ -662,8 +670,8 @@ class LinkedInCrawler:
             print(f"[INFO] Search URL: {search_url}")
 
             try:
-                self.page.goto(search_url, timeout=45000)
-                self.page.wait_for_timeout(5000)
+                self.page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
+                self.page.wait_for_timeout(4000)
 
                 added = self.extract_update_urns_from_dom(post_urls, seen)
                 print(f"[INFO] Added {added} urls (initial), total unique={len(post_urls)}")
@@ -672,13 +680,18 @@ class LinkedInCrawler:
                     print(f"[INFO] Current page URL: {self.page.url}")
                     self.save_debug_screenshot("debug_search_initial.png")
 
-                scroll_times = random.randint(5, 10)
+                scroll_times = random.randint(3, 6)
                 print(f"[INFO] Randomly decided to scroll {scroll_times} times.")
 
                 for i in range(scroll_times):
+                    # Cek batas waktu saat scroll
+                    if time.time() - keyword_start_time > MAX_KEYWORD_DURATION_SECONDS:
+                        print(f"[WARNING] Keyword duration limit reached during scroll. Breaking.")
+                        break
+
                     try:
                         moved = self.scroll_search_results()
-                        self.page.wait_for_timeout(int(random.uniform(3, 6) * 1000))
+                        self.page.wait_for_timeout(int(random.uniform(2, 4) * 1000))
 
                         added = self.extract_update_urns_from_dom(post_urls, seen)
                         print(
@@ -690,7 +703,7 @@ class LinkedInCrawler:
                         break
 
             except Exception as e:
-                print("[ERROR] Failed to crawl:", e)
+                print("[ERROR] Failed to crawl search page:", e)
                 break
 
             if not scroll:
@@ -702,21 +715,27 @@ class LinkedInCrawler:
         print("=" * 90)
 
         total_data = 0
-        print("[INFO] Start crawling post url.")
+        print(f"[INFO] Start crawling {len(post_urls)} post urls.")
         for url in post_urls:
+            # Cek batas waktu saat crawling detail postingan
+            if time.time() - keyword_start_time > MAX_KEYWORD_DURATION_SECONDS:
+                print(f"[WARNING] Max duration ({MAX_KEYWORD_DURATION_SECONDS}s) reached during post extraction. Moving to next keyword.")
+                break
+
             print(f"[INFO] Post URL: {url}")
             try:
                 datetime_crawling_ms = int(datetime.datetime.now().timestamp() * 1000)
                 created_time = datetime.datetime.now().isoformat()
                 updated_time = None
                 hashtag = []
-                raw_html = requests.get(url=url).text
+                # Pasang timeout 15 detik agar requests.get tidak hang selamanya
+                raw_html = requests.get(url=url, timeout=15).text
 
                 if "telescopeScope" in raw_html:
                     print("\033[33m[INFO] Private post found.\033[0m")
                     print("\033[33m[INFO] Starting to get URL with browser.\033[0m")
-                    self.page.goto(url)
-                    self.dummy_wait(5)
+                    self.page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    self.dummy_wait(3)
                     soup = BeautifulSoup(self.page.content(), 'html.parser')
                     mode = "playwright"
                 else:

@@ -20,7 +20,7 @@ os.environ.setdefault("VM", "local")
 # Get public ip for metadata
 def get_public_ip():
 	try:
-		response = requests.get('https://api.ipify.org?format=json')
+		response = requests.get('https://api.ipify.org?format=json', timeout=5)
 		response.raise_for_status()
 		ip_info = response.json()
 		return ip_info["ip"]		
