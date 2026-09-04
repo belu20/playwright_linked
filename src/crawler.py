@@ -665,7 +665,7 @@ class LinkedInCrawler:
                 + keyword
                 + "&page="
                 + str(page_count)
-                + "&sortBy=\"date_posted\"&datePosted=\"past-24h\""
+                + "&sortBy=\"date_posted\"&datePosted=\"past-month\""
             )
             print(f"[INFO] Search URL: {search_url}")
 
