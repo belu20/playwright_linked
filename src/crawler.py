@@ -39,6 +39,16 @@ class LinkedInCrawler:
         )
         os.makedirs(profile_dir, exist_ok=True)
 
+        # Bersihkan file lock Chrome sebelum start agar Chromium tidak hang saat launch
+        for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+            lock_path = os.path.join(profile_dir, lock_file)
+            if os.path.exists(lock_path) or os.path.islink(lock_path):
+                try:
+                    os.remove(lock_path)
+                    print(f"[INFO] Cleared stale Chrome lock: {lock_file}")
+                except Exception as e:
+                    print(f"[WARNING] Could not remove {lock_file}: {e}")
+
         self.playwright = sync_playwright().start()
 
         self.context = self.playwright.chromium.launch_persistent_context(
@@ -81,6 +91,10 @@ class LinkedInCrawler:
                 'Chrome/120.0.0.0 Safari/537.36'
             ),
         )
+
+        # Pasang default timeout agar tidak ada navigasi atau aksi yang hang selamanya
+        self.context.set_default_timeout(20000)
+        self.context.set_default_navigation_timeout(25000)
 
         # Stealth evasion: Hapus flag navigator.webdriver dan mock fingerprint browser asli
         self.context.add_init_script("""
@@ -154,6 +168,16 @@ class LinkedInCrawler:
             os.environ.get("CHROME_PROFILE_ROOT", "/app/chrome_profiles"),
             f"client_{self.client_id}"
         )
+
+        # Hapus juga stale lock files pada profile_dir
+        for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+            lock_path = os.path.join(profile_dir, lock_file)
+            if os.path.exists(lock_path) or os.path.islink(lock_path):
+                try:
+                    os.remove(lock_path)
+                except Exception:
+                    pass
+
         default_dir = os.path.join(profile_dir, "Default")
 
         # Folder-folder ini aman dihapus karena cuma cache/history,
@@ -496,25 +520,36 @@ class LinkedInCrawler:
                 },
                 self.start_time
             )
-            self.kill_service("Failed to login, please check the account.")
+            if self.current_username:
+                try:
+                    self.account_manager.mark_account_failed(self.current_username)
+                    self.account_manager.release_account(self.current_username)
+                except Exception as acc_e:
+                    print(f"[WARNING] Error updating account status: {acc_e}")
 
         return status
 
     def check_login_status(self) -> dict:
         print("[INFO] Check login status")
-        self.page.goto("http://www.linkedin.com")
+        try:
+            self.page.goto("https://www.linkedin.com/feed", timeout=20000, wait_until="domcontentloaded")
+            self.dummy_wait(2)
+        except Exception as e:
+            print(f"[WARNING] Check login status navigation warning: {e}")
 
         is_login = True
-        found = None
         try:
-            btn = self.page.query_selector('.nav__button-secondary')
-            if btn:
-                found = btn.inner_text()
+            curr_url = self.page.url
+            if "linkedin.com/login" in curr_url or "checkpoint" in curr_url or "authwall" in curr_url:
+                is_login = False
+            else:
+                btn = self.page.query_selector('.nav__button-secondary')
+                if btn:
+                    txt = (btn.inner_text() or "").lower()
+                    if "sign in" in txt or "masuk" in txt:
+                        is_login = False
         except Exception:
             pass
-
-        if found is not None:
-            is_login = False
 
         result = {"is_login": is_login}
 
@@ -530,7 +565,7 @@ class LinkedInCrawler:
                 },
                 self.start_time
             )
-            self.kill_service("Access failed - The status of the search page may be logged out, immediately check the status of the account being used.")
+            print("[WARNING] Account logged out or session expired.")
 
         return result
 
@@ -642,7 +677,6 @@ class LinkedInCrawler:
         return moved
 
     def crawling(self, keyword: str, scroll: bool, server_ip: str, git_commit_id: str):
-        self.check_login_status()
         post_urls = []
         max_pagination = 10
         page_count = 0
@@ -670,8 +704,18 @@ class LinkedInCrawler:
             print(f"[INFO] Search URL: {search_url}")
 
             try:
-                self.page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
-                self.page.wait_for_timeout(4000)
+                self.page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
+                self.page.wait_for_timeout(3000)
+
+                # Deteksi jika sesi expired atau terkena authwall
+                curr_url = self.page.url
+                if "linkedin.com/login" in curr_url or "checkpoint" in curr_url or "authwall" in curr_url:
+                    print("[WARNING] Sesi expired terdeteksi pada search URL. Mencoba login ulang...")
+                    if self.login() != 1:
+                        print("[ERROR] Login ulang gagal. Melewatkan target keyword ini.")
+                        return 0
+                    self.page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
+                    self.page.wait_for_timeout(3000)
 
                 added = self.extract_update_urns_from_dom(post_urls, seen)
                 print(f"[INFO] Added {added} urls (initial), total unique={len(post_urls)}")
@@ -715,7 +759,27 @@ class LinkedInCrawler:
         print("=" * 90)
 
         total_data = 0
+        MAX_POSTS_PER_KEYWORD = int(os.environ.get("MAX_POSTS_PER_KEYWORD", 25))
+        if len(post_urls) > MAX_POSTS_PER_KEYWORD:
+            print(f"[INFO] Membatasi post URLs menjadi {MAX_POSTS_PER_KEYWORD} (dari total {len(post_urls)}) untuk mencegah engine stuck.")
+            post_urls = post_urls[:MAX_POSTS_PER_KEYWORD]
+
         print(f"[INFO] Start crawling {len(post_urls)} post urls.")
+
+        # Buat HTTP session dengan cookies aktif browser untuk ekstraksi cepat tanpa beban DOM
+        http_session = requests.Session()
+        http_session.headers.update({
+            "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        })
+        try:
+            if self.context:
+                for c in self.context.cookies():
+                    http_session.cookies.set(c['name'], c['value'], domain=c.get('domain', '.linkedin.com'))
+        except Exception as ce:
+            print(f"[WARNING] Gagal sync cookies ke HTTP session: {ce}")
+
         for url in post_urls:
             # Cek batas waktu saat crawling detail postingan
             if time.time() - keyword_start_time > MAX_KEYWORD_DURATION_SECONDS:
@@ -728,16 +792,24 @@ class LinkedInCrawler:
                 created_time = datetime.datetime.now().isoformat()
                 updated_time = None
                 hashtag = []
-                # Pasang timeout 15 detik agar requests.get tidak hang selamanya
-                raw_html = requests.get(url=url, timeout=15).text
 
-                if "telescopeScope" in raw_html:
-                    print("\033[33m[INFO] Private post found.\033[0m")
-                    print("\033[33m[INFO] Starting to get URL with browser.\033[0m")
-                    self.page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                    self.dummy_wait(3)
-                    soup = BeautifulSoup(self.page.content(), 'html.parser')
-                    mode = "playwright"
+                raw_html = ""
+                try:
+                    resp = http_session.get(url=url, timeout=12)
+                    raw_html = resp.text
+                except Exception as req_err:
+                    print(f"[WARNING] HTTP request error pada {url}: {req_err}")
+
+                if "telescopeScope" in raw_html or not raw_html:
+                    print("\033[33m[INFO] Private post atau HTTP request butuh browser. Fallback ke Playwright.\033[0m")
+                    try:
+                        self.page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                        self.dummy_wait(2)
+                        soup = BeautifulSoup(self.page.content(), 'html.parser')
+                        mode = "playwright"
+                    except Exception as pe:
+                        print(f"[ERROR] Browser navigation error pada {url}: {pe}")
+                        continue
                 else:
                     soup = BeautifulSoup(raw_html, 'html.parser')
                     mode = "requests"
@@ -986,7 +1058,13 @@ class LinkedInCrawler:
 
             except Exception as e:
                 print("[ERROR] Reason:", e)
-            time.sleep(2)
+            time.sleep(1)
+
+        # Flush Kafka queue di akhir batch keyword
+        try:
+            self.publisher.flush(timeout=3.0)
+        except Exception as fe:
+            print(f"[WARNING] Kafka flush warning: {fe}")
 
         self.logger.generate_log(
             0000,
@@ -1005,14 +1083,15 @@ class LinkedInCrawler:
         return 1
 
     def kill_service(self, message: str):
-        print(message)
+        """
+        Cleanup driver dan rilis akun saat terjadi kendala,
+        tanpa mematikan web service agar /status tetap bisa merespons healthcheck.
+        """
+        print(f"[INFO] Service cleanup: {message}")
         if self.current_username:
-            self.account_manager.release_account(self.current_username)
-            self.account_manager.mark_account_failed(self.current_username)
-
-        import multiprocessing
-        import sys
-        for prc in multiprocessing.active_children():
-            prc.terminate()
+            try:
+                self.account_manager.release_account(self.current_username)
+                self.account_manager.mark_account_failed(self.current_username)
+            except Exception as e:
+                print(f"[WARNING] Gagal rilis akun: {e}")
         self.close_driver()
-        sys.exit(0)

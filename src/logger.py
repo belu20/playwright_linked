@@ -12,7 +12,7 @@ class Logger:
         self.service_name = service_name
         self.vm_name = vm_name
         self.log_status_value = log_status_value
-        self.log_dir = "logs"
+        self.log_dir = os.environ.get("LOG_DIR", "logs")
         os.makedirs(self.log_dir, exist_ok=True)
 
         # ---- Rotating file logger ----

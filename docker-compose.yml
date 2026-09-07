@@ -1,36 +1,51 @@
 services:
   linkedin-search:
     image: "linkedin-search-antam"
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: linkedin-search-antam
-    restart: on-failure:5
-    init: true
-    shm_size: "256mb"     # tmpfs limit aman untuk Chrome tanpa crash (hanya terpakai sesuai kebutuhan)
-    mem_limit: 850m       # budget 4×850MB = 3.4GB, aman di 4GB RAM
-    cpus: 0.5
+    restart: unless-stopped
+    stop_grace_period: 30s # Beri waktu 30 detik untuk shutdown bersih (rilis akun di MongoDB & simpan session cookie)
+    init: true # Gunakan tini init process untuk mencegah zombie chromium processes
+    shm_size: "256mb" # tmpfs shared memory aman untuk Chrome tanpa crash
+    mem_limit: 850m # Budget alokasi memori container
+    mem_reservation: 450m # Soft memory reservation untuk stabilitas sistem host
+    cpus: 0.8
     ports:
       - "1567:1567"
     env_file:
       - .env
     environment:
       - TYPE=keyword
-      - CLIENT_ID=49590 # PINDAHAN DB -- pastikan cocok dengan client_id akun di MongoDB
+      - CLIENT_ID=49590 # Pastikan cocok dengan client_id akun di MongoDB
       - LIMIT=300
       - SOURCE=linkedin
       - ID_TARGET=1
       - VM=VM-CRAWLING-ANTAM
       - PORT=1567
+      - LOG_DIR=/logs
       - CHROME_PROFILE_ROOT=/app/chrome_profiles
       - RESTART_DRIVER_EVERY_N_KEYWORDS=7
+      - MAX_POSTS_PER_KEYWORD=25
+      - LOOP_SLEEP_SECONDS=600
     volumes:
       - /home/promtail/:/logs
       - /data/chrome_profiles/client_49590:/app/chrome_profiles/client_49590
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:$${PORT:-1567}/status || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "curl -f http://127.0.0.1:$${PORT:-1567}/healthz || curl -f http://127.0.0.1:$${PORT:-1567}/status || exit 1",
+        ]
       interval: 30s
-      timeout: 15s
-      start_period: 60s
-      retries: 5
+      timeout: 10s
+      start_period: 45s
+      retries: 3
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     logging:
       driver: "json-file"
       options:

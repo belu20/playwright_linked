@@ -49,8 +49,7 @@ class DataPublisher:
                     value=value_bytes,
                     callback=self._delivery_callback
                 )
-                self.producer.poll(0)  # Trigger delivery callback
-                self.producer.flush()  # Wait for message delivery
+                self.producer.poll(0)  # Non-blocking trigger delivery callback
                 return True
             except Exception as e:
                 print(f"[ERROR] Failed to produce message to Kafka: {e}")
@@ -64,7 +63,16 @@ class DataPublisher:
                             "error": str(e)
                         }
                     )
-                raise e
+                return False
         else:
             print("[WARNING] Kafka configuration missing, message not sent.")
             return False
+
+    def flush(self, timeout: float = 2.0):
+        """Flush Kafka queue secara aman dengan batas timeout untuk mencegah engine hang."""
+        if self.producer:
+            try:
+                self.producer.flush(timeout)
+            except Exception as e:
+                print(f"[WARNING] Kafka flush error: {e}")
+

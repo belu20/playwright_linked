@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 import random
+import signal
 import urllib.parse
 from multiprocessing import Process, Value
 
@@ -35,9 +37,49 @@ def run_web_service(port_num: int, git_commit_id_str: str, log_status_val):
     )
     web_service.run()
 
+def ensure_flask_process(flask_process, port_num: int, git_commit_id_str: str, log_status_val):
+    """
+    Supervisor watchdog: memastikan proses web service Flask selalu hidup
+    agar endpoint /status tidak crash dan docker healthcheck selalu lulus.
+    """
+    if flask_process is None or not flask_process.is_alive():
+        print("[WARNING] Flask web service process is not running. Starting/Restarting...")
+        try:
+            if flask_process is not None:
+                flask_process.terminate()
+                flask_process.join(timeout=2)
+        except Exception:
+            pass
+        new_process = Process(
+            target=run_web_service,
+            args=(port_num, git_commit_id_str, log_status_val)
+        )
+        new_process.daemon = True
+        new_process.start()
+        print(f"[INFO] Flask web service started on PID {new_process.pid} (port {port_num})")
+        return new_process
+    return flask_process
+
+def interruptible_sleep(seconds: int, step: int = 5, on_step=None):
+    """
+    Sleep bertahap agar tidak blocking total dan responsif terhadap interrupt/heartbeat.
+    """
+    start = time.time()
+    while time.time() - start < seconds:
+        if on_step:
+            try:
+                on_step()
+            except Exception:
+                pass
+        remaining = int(seconds - (time.time() - start))
+        if remaining <= 0:
+            break
+        time.sleep(min(step, remaining))
+
 if __name__ == '__main__':
     # Initialize shared multiprocessing state for Flask API
     log_status_value = Value('i', -1)
+    web_port = int(os.environ.get("PORT", 5000))
     
     # Initialize OOP Managers
     logger = Logger(
@@ -69,29 +111,54 @@ if __name__ == '__main__':
     )
     
     # Setup and start the Flask web service in a background process
-    flask_process = Process(
-        target=run_web_service,
-        args=(int(os.environ.get("PORT", 5000)), git_commit_id, log_status_value)
-    )
-    flask_process.start()
+    flask_process = None
+    flask_process = ensure_flask_process(flask_process, web_port, git_commit_id, log_status_value)
     
+    # Handle graceful exit
+    def signal_handler(sig, frame):
+        print(f"\n[INFO] Signal {sig} received, shutting down gracefully...")
+        try:
+            crawler.close_driver()
+        except Exception:
+            pass
+        try:
+            if flask_process and flask_process.is_alive():
+                flask_process.terminate()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, signal_handler)
+
     # Initialize crawler driver
+    print("[INFO] Initializing browser driver...")
     crawler.init_driver()
     
-    # Perform initial login
+    # Perform initial login with self-healing retry loop
     login_status = crawler.login()
-    if login_status != 1:
-        crawler.kill_service("[ERROR] Failed to login => Engine shutdown")
+    while login_status != 1:
+        print("[WARNING] Initial login failed. Retrying in 30 seconds... Web service remains active.")
+        flask_process = ensure_flask_process(flask_process, web_port, git_commit_id, log_status_value)
+        interruptible_sleep(30)
+        try:
+            crawler.restart_driver()
+            login_status = crawler.login()
+        except Exception as e:
+            print(f"[ERROR] Error during login retry: {e}")
         
     try:
         while True:
+            flask_process = ensure_flask_process(flask_process, web_port, git_commit_id, log_status_value)
+            
             # Refresh start time for logging duration calculation
             crawler.start_time = time.time()
             
             import requests
             print(f"[INFO] Fetching keywords from MDM: {list_api_keyword}")
             try:
-                resp = requests.get(list_api_keyword, timeout=30)
+                resp = requests.get(list_api_keyword, timeout=20)
                 resp.raise_for_status()
                 resp_json = resp.json()
                 api_data = resp_json.get("data", {})
@@ -117,6 +184,7 @@ if __name__ == '__main__':
             keyword_counter = 0
 
             for target in targets:
+                flask_process = ensure_flask_process(flask_process, web_port, git_commit_id, log_status_value)
                 keyword = target["keyword"]
                 scroll = target["scroll"]
                 
@@ -141,17 +209,43 @@ if __name__ == '__main__':
 
                 keyword_counter += 1
                 if keyword_counter % RESTART_DRIVER_EVERY_N_KEYWORDS == 0:
-                    crawler.restart_driver()
+                    try:
+                        crawler.restart_driver()
+                    except Exception as rst_err:
+                        print(f"[WARNING] Driver periodic restart warning: {rst_err}")
                 
-                random_sleep = random.randint(80, 100)
+                random_sleep = random.randint(60, 90)
                 print(f"[INFO] Waiting for {random_sleep} seconds before starting the next target.")
-                time.sleep(random_sleep)
+                interruptible_sleep(
+                    random_sleep,
+                    step=5,
+                    on_step=lambda: ensure_flask_process(flask_process, web_port, git_commit_id, log_status_value)
+                )
                 
-            print("[INFO] Please wait 1000 seconds before the next loop.")
-            time.sleep(1000)
+            LOOP_SLEEP_SECONDS = int(os.environ.get("LOOP_SLEEP_SECONDS", 600))
+            print(f"[INFO] Batch completed. Standby for {LOOP_SLEEP_SECONDS} seconds before the next loop.")
+            
+            start_loop_wait = time.time()
+            while time.time() - start_loop_wait < LOOP_SLEEP_SECONDS:
+                flask_process = ensure_flask_process(flask_process, web_port, git_commit_id, log_status_value)
+                rem = int(LOOP_SLEEP_SECONDS - (time.time() - start_loop_wait))
+                if rem <= 0:
+                    break
+                if rem % 60 < 5:
+                    print(f"[HEARTBEAT] Engine standby: ~{rem}s remaining before next crawl cycle. Web service is active.")
+                time.sleep(min(10, max(1, rem)))
             
     except KeyboardInterrupt:
         print("[INFO] Stopped by user.")
     finally:
-        crawler.close_driver()
-        flask_process.terminate()
+        print("[INFO] Cleaning up resources...")
+        try:
+            crawler.close_driver()
+        except Exception:
+            pass
+        try:
+            if flask_process and flask_process.is_alive():
+                flask_process.terminate()
+                flask_process.join(timeout=2)
+        except Exception:
+            pass

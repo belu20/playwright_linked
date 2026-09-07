@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+
+# Environment and sensitive data
+.env
+accounts.json
+
+# Local runtime & debug artifacts
+logs/
+debug_image/
+crawling_result/
+chrome_profiles/
+files.zip
+
+# Docker & Documentation
+Dockerfile*
+docker-compose*.yml
+README.md
+.dockerignore
