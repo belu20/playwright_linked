@@ -51,9 +51,10 @@ class LinkedInCrawler:
 
         self.playwright = sync_playwright().start()
 
+        is_headless = os.environ.get("HEADLESS", "true").lower() == "true"
         self.context = self.playwright.chromium.launch_persistent_context(
             profile_dir,
-            headless=False,
+            headless=is_headless,
             args=[
                 # --- Wajib untuk headless/container ---
                 '--no-sandbox',
@@ -582,7 +583,14 @@ class LinkedInCrawler:
 
     def extract_update_urns_from_dom(self, post_urls: list, seen: set) -> int:
         added = 0
-        src = self.page.content() or ""
+        try:
+            # Lebih cepat dan hemat memori dibanding serialisasi full outer DOM
+            src = self.page.evaluate("() => document.body ? document.body.innerHTML : ''") or ""
+        except Exception:
+            try:
+                src = self.page.content() or ""
+            except Exception:
+                src = ""
 
         ugc_patterns = [
             r'userGeneratedContentId=(\d{19})',
@@ -658,19 +666,28 @@ class LinkedInCrawler:
         moved = False
         try:
             # 1. Scroll window secara langsung
-            self.page.evaluate("window.scrollBy(0, 1000);")
+            self.page.evaluate("() => { window.scrollBy(0, 1000); }")
             # 2. Kirim tombol PageDown yang paling natural & ringan memicu infinite scroll LinkedIn
             self.page.keyboard.press("PageDown")
             moved = True
         except Exception as e:
             print(f"[DEBUG] scroll failed: {e}")
 
-        # 3. Klik tombol 'Load more' jika muncul (pakai CSS selector cepat tanpa XPath berat)
+        # 3. Klik tombol 'Load more' jika muncul (force=True & no_wait_after=True agar anti-hang)
         try:
             load_more = self.page.locator("button.scaffold-finite-scroll__load-button").first
             if load_more.is_visible(timeout=500):
-                load_more.click(timeout=1000)
+                load_more.click(timeout=1000, force=True, no_wait_after=True)
                 print("[INFO] Clicked 'Load more' button")
+        except Exception:
+            pass
+
+        # 4. Tutup modal/popup pengganggu jika ada
+        try:
+            dismiss_btn = self.page.locator("button.artdeco-modal__dismiss, button[aria-label='Dismiss'], button[aria-label='Tutup']").first
+            if dismiss_btn.is_visible(timeout=300):
+                dismiss_btn.click(timeout=500, force=True, no_wait_after=True)
+                print("[INFO] Dismissed modal popup")
         except Exception:
             pass
 
@@ -815,6 +832,10 @@ class LinkedInCrawler:
                     # Cek batas waktu saat scroll
                     if time.time() - keyword_start_time > MAX_KEYWORD_DURATION_SECONDS:
                         print(f"[WARNING] Keyword duration limit reached during scroll. Breaking.")
+                        break
+
+                    if len(post_urls) >= MAX_POSTS_PER_KEYWORD:
+                        print(f"[INFO] Target {len(post_urls)} posts tercapai. Menghentikan scroll.")
                         break
 
                     try:
