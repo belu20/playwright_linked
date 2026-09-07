@@ -53,7 +53,7 @@ class LinkedInCrawler:
 
         self.context = self.playwright.chromium.launch_persistent_context(
             profile_dir,
-            headless=True,
+            headless=False,
             args=[
                 # --- Wajib untuk headless/container ---
                 '--no-sandbox',
@@ -676,6 +676,90 @@ class LinkedInCrawler:
 
         return moved
 
+    def parse_post_time(self, post_time_str: str = None, post_id: str = None, url: str = None):
+        """
+        Parse post relative time string (e.g. '1m', '3 jam', '2d', '1w', '2 bln')
+        ke format datetime & timestamp ms. Jika selector DOM gagal atau None,
+        fallback otomatis mengekstrak exact creation timestamp dari Snowflake ID
+        LinkedIn (post_id / URN).
+        """
+        post_time_datetime = None
+        post_time_datetimems = None
+        cleaned_str = None
+
+        if post_time_str and isinstance(post_time_str, str):
+            cleaned = post_time_str.replace("\n", " ").strip()
+            for marker in ["·", "•", "Edited", "Diedit", "diedit", "edited"]:
+                cleaned = cleaned.replace(marker, " ")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if cleaned:
+                cleaned_str = cleaned
+
+            match = re.search(r"(\d+)\s*([a-zA-Z]+)", cleaned)
+            if match:
+                val, unit = match.groups()
+                u = unit.lower()
+                target = None
+                if u in ["m", "min", "mins", "minute", "minutes", "mnt"]:
+                    target = f"{val} minutes ago"
+                elif u in ["h", "hour", "hours", "jam", "j"]:
+                    target = f"{val} hours ago"
+                elif u in ["hr"]:
+                    target = f"{val} days ago"
+                elif u in ["d", "day", "days", "hari"]:
+                    target = f"{val} days ago"
+                elif u in ["w", "wk", "wks", "week", "weeks", "mgg", "minggu"]:
+                    target = f"{val} weeks ago"
+                elif u in ["mo", "mos", "month", "months", "bln", "bulan"]:
+                    target = f"{val} months ago"
+                elif u in ["y", "yr", "yrs", "year", "years", "thn", "tahun"]:
+                    target = f"{val} years ago"
+                elif u in ["s", "sec", "secs", "second", "seconds", "dtk", "detik"]:
+                    target = f"{val} seconds ago"
+
+                if target:
+                    try:
+                        post_time_datetime = moment.date(target)
+                    except Exception:
+                        post_time_datetime = None
+
+            if not post_time_datetime and cleaned:
+                if cleaned.lower() in ["now", "just now", "baru saja"]:
+                    post_time_datetime = moment.now()
+                else:
+                    try:
+                        post_time_datetime = moment.date(cleaned)
+                    except Exception:
+                        post_time_datetime = None
+
+            if post_time_datetime:
+                try:
+                    post_time_datetimems = int(post_time_datetime.datetime.timestamp() * 1000)
+                except Exception:
+                    post_time_datetimems = None
+
+        # Fallback ke LinkedIn Snowflake timestamp dari post_id / URL jika parsing gagal
+        if post_time_datetimems is None:
+            for candidate in [post_id, url]:
+                if candidate:
+                    m = re.search(r"(\d{18,19})", str(candidate))
+                    if m:
+                        raw_id = int(m.group(1))
+                        sf_ts = raw_id >> 22
+                        # Validasi rentang tahun 2015 s/d 2035
+                        if 1420070400000 <= sf_ts <= 2051222400000:
+                            post_time_datetimems = sf_ts
+                            dt_obj = datetime.datetime.fromtimestamp(sf_ts / 1000, datetime.timezone.utc)
+                            try:
+                                post_time_datetime = moment.date(dt_obj.strftime("%Y-%m-%d %H:%M:%S"))
+                            except Exception:
+                                pass
+                            if not cleaned_str:
+                                cleaned_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+                            break
+
+        return cleaned_str, post_time_datetime, post_time_datetimems
+
     def crawling(self, keyword: str, scroll: bool, server_ip: str, git_commit_id: str):
         post_urls = []
         max_pagination = 10
@@ -866,27 +950,26 @@ class LinkedInCrawler:
                     except Exception:
                         post_owner_pic = None
 
+                    post_time_str = None
                     try:
-                        post_time_str = soup.find("time").text.split("·")[0].replace("\n", "").replace(" ", "").replace("Edited", "").strip()
+                        time_el = (
+                            soup.find("time")
+                            or soup.select_one("[class*='actor__sub-description']")
+                            or soup.select_one("[class*='sub-description']")
+                            or soup.select_one(".share-update-card__actor-sub-headline")
+                            or soup.select_one(".feed-shared-actor__sub-description")
+                            or soup.select_one("[data-test-id='post-time']")
+                        )
+                        if time_el:
+                            post_time_str = time_el.get_text(strip=True)
                     except Exception:
                         post_time_str = None
 
-                    try:
-                        if "m" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("m", "minutes ago"))
-                        elif "h" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("h", "hours ago"))
-                        elif "d" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("d", "days ago"))
-                        else:
-                            post_time_datetime = moment.date(post_time_str)
-                    except Exception as e:
-                        post_time_datetime = None
-                        print("[ERROR] Failed to get post time:", e)
-                    try:
-                        post_time_datetimems = int(post_time_datetime.datetime.timestamp() * 1000)
-                    except Exception:
-                        post_time_datetimems = None
+                    post_time_str, post_time_datetime, post_time_datetimems = self.parse_post_time(
+                        post_time_str=post_time_str,
+                        post_id=post_id,
+                        url=url
+                    )
 
                 # PLAYWRIGHT (private post)
                 elif mode == "playwright":
@@ -976,33 +1059,24 @@ class LinkedInCrawler:
                         el = self.page.query_selector(
                             "[class*='update-components-actor__sub-description'][class*='text-body-xsmall']"
                         )
-                        if el:
-                            post_time_str = el.inner_text().split(" •")[0].replace(" • Edited •   ", "").replace(" • Diedit •   ", "").replace("\n", "").strip()
-                        else:
-                            post_time_str = None
+                        if not el:
+                            el = (
+                                self.page.query_selector("span[class*='update-components-actor__sub-description']")
+                                or self.page.query_selector("div[class*='update-components-actor__meta'] span[class*='sub-description']")
+                                or self.page.query_selector("span.feed-shared-actor__sub-description")
+                                or self.page.query_selector("time")
+                                or self.page.query_selector("[data-test-id='post-time']")
+                            )
+                        post_time_str = el.inner_text().strip() if el else None
                     except Exception:
                         post_time_str = None
                     print_blue(f"[DEBUG] Post date: {post_time_str}")
 
-                    try:
-                        if "mnt" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("mnt", "minutes ago"))
-                        elif "jam" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("jam", "hours ago"))
-                        elif "hr" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("hr", "days ago"))
-                        elif "mgg" in post_time_str:
-                            post_time_datetime = moment.date(post_time_str.replace("mgg", "weeks ago"))
-                        else:
-                            post_time_datetime = moment.date(post_time_str)
-                    except Exception as e:
-                        post_time_datetime = None
-                        print("[ERROR] Failed to get post_time_datetime:", e)
-
-                    try:
-                        post_time_datetimems = int(post_time_datetime.datetime.timestamp() * 1000)
-                    except Exception:
-                        post_time_datetimems = None
+                    post_time_str, post_time_datetime, post_time_datetimems = self.parse_post_time(
+                        post_time_str=post_time_str,
+                        post_id=post_id,
+                        url=url
+                    )
 
                 total_data += 1
                 print(f"[DEBUG] [{total_data}] {post_id} | {post_time_str}")
@@ -1041,7 +1115,7 @@ class LinkedInCrawler:
                     },
                     "post_time": {
                         "post_time_str": post_time_str,
-                        "post_time_datetime": str(post_time_datetime.date) if post_time_datetime else None,
+                        "post_time_datetime": str(post_time_datetime.date) if (post_time_datetime and hasattr(post_time_datetime, "date") and not callable(post_time_datetime.date)) else (str(post_time_datetime) if post_time_datetime else None),
                         "post_time_datetimems": post_time_datetimems
                     },
                     "datetime_ms": post_time_datetimems,
